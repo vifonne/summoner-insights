@@ -53,7 +53,7 @@ Transform your League of Legends gameplay with personalized AI coaching! Summone
 
 2. **Open WSL terminal** and clone the repository:
    ```bash
-   git clone https://github.com/yourusername/summoner-insights.git
+   git clone https://github.com/vifonne/summoner-insights.git
    cd summoner-insights
    ```
 
@@ -72,7 +72,7 @@ Transform your League of Legends gameplay with personalized AI coaching! Summone
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/summoner-insights.git
+   git clone https://github.com/vifonne/summoner-insights.git
    cd summoner-insights
    ```
 
