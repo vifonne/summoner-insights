@@ -6,6 +6,9 @@
 
 Transform your League of Legends gameplay with personalized AI coaching! Summoner Insights automatically collects match data from the Riot API and provides Claude with detailed performance analytics for personalized improvement recommendations.
 
+## Demo
+![demo](img/demo.gif)
+
 ## 🚀 Features
 
 - **📊 Comprehensive Match Tracking** - Automatically fetch and store your recent match history
