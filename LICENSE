@@ -1,0 +1,54 @@
+Summoner Insights Non-Commercial License
+
+Copyright (c) 2025 Summoner Insights Contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction for NON-COMMERCIAL purposes only, including
+without limitation the rights to use, copy, modify, merge, publish, distribute,
+and sublicense copies of the Software, subject to the following conditions:
+
+1. NON-COMMERCIAL USE ONLY
+   The Software may not be used for commercial purposes. Commercial purposes
+   include, but are not limited to:
+   - Selling the Software or any derivative works
+   - Using the Software in a commercial product or service
+   - Using the Software to generate revenue or profit
+   - Incorporating the Software into commercial applications
+
+2. ATTRIBUTION
+   The above copyright notice and this permission notice shall be included in
+   all copies or substantial portions of the Software.
+
+3. MODIFICATIONS AND DERIVATIVES
+   Modifications and derivative works are permitted for non-commercial use only
+   and must be distributed under this same license.
+
+4. RIOT GAMES COMPLIANCE
+   Users must comply with Riot Games' Terms of Service and API Terms of Use.
+   This Software is not affiliated with or endorsed by Riot Games, Inc.
+
+5. COMMERCIAL LICENSE AVAILABLE
+   For commercial use, please contact the project maintainers to obtain a
+   separate commercial license.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+ADDITIONAL TERMS:
+
+- Educational Use: Permitted for schools, universities, and educational institutions
+- Research Use: Permitted for academic and non-commercial research
+- Personal Use: Permitted for individual, non-commercial use
+- Open Source Contributions: Contributions to this project are welcome and
+  subject to this same license
+
+For questions about licensing or to request commercial use permissions,
+please open an issue on the project repository.
