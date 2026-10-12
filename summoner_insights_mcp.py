@@ -5,6 +5,7 @@ Provides Claude with access to League of Legends match history and timeline data
 """
 
 import asyncio
+import os
 import sqlite3
 import json
 from typing import Any, Sequence
@@ -14,21 +15,73 @@ from mcp.types import Resource, Tool, TextContent, ImageContent, EmbeddedResourc
 import mcp.types as types
 from pydantic import AnyUrl
 import argparse
+import ast
+
+from summoner_insights import account_db_path
+
+
+def is_player_death(details: str, participant_id: int | None) -> bool:
+    if participant_id is None or not details:
+        return False
+    try:
+        parsed = ast.literal_eval(details)
+    except (ValueError, SyntaxError):
+        return False
+    return isinstance(parsed, dict) and parsed.get('victim') == participant_id
+
+
+QUEUE_IDS = {
+    'ranked_solo': (420,),
+    'ranked_flex': (440,),
+    'ranked': (420, 440),
+    'normal': (400, 430, 490),
+    'aram': (450,),
+}
+
+QUEUE_NAMES = {
+    420: 'Ranked Solo/Duo',
+    440: 'Ranked Flex',
+    400: 'Normal Draft',
+    430: 'Normal Blind',
+    490: 'Quickplay',
+    450: 'ARAM',
+}
+
+REMAKE_MAX_SECONDS = 300
+
+QUEUE_PROPERTY = {
+    "type": "string",
+    "enum": ["all", *QUEUE_IDS],
+    "description": "Only include matches from this queue (default: all)",
+    "default": "all",
+}
+
+
+def queue_condition(queue: str | None) -> tuple[str, tuple]:
+    if not queue or queue == 'all':
+        return "1 = 1", ()
+    if queue not in QUEUE_IDS:
+        raise ValueError(f"Unknown queue: {queue}. Expected one of: all, {', '.join(QUEUE_IDS)}")
+    ids = QUEUE_IDS[queue]
+    return f"queue_id IN ({','.join('?' * len(ids))})", ids
+
+
+def average(values) -> float | None:
+    values = [v for v in values if v is not None]
+    return sum(values) / len(values) if values else None
 
 
 class SummonerInsightsMCP:
     def __init__(self, db_path: str = None):
         if db_path is None:
-            import os
-            # Use absolute path relative to this script
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            self.db_path = os.path.join(script_dir, "summoner_insights.db")
-        else:
-            self.db_path = db_path
+            username, tagline = os.getenv('RIOT_USERNAME'), os.getenv('RIOT_TAGLINE')
+            if not username or not tagline:
+                raise ValueError("Missing required environment variables: RIOT_USERNAME, RIOT_TAGLINE")
+            db_path = account_db_path(username, tagline)
+        self.db_path = db_path
         self.server = Server("summoner-insights")
     
     def get_db_connection(self):
-        import os
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"Database file not found at: {self.db_path}")
         return sqlite3.connect(self.db_path)
@@ -47,7 +100,8 @@ class SummonerInsightsMCP:
                                 "type": "integer",
                                 "description": "Number of matches to retrieve (default: 10)",
                                 "default": 10
-                            }
+                            },
+                            "queue": QUEUE_PROPERTY
                         }
                     }
                 ),
@@ -75,7 +129,8 @@ class SummonerInsightsMCP:
                                 "type": "integer",
                                 "description": "Number of recent matches to analyze (default: 10)",
                                 "default": 10
-                            }
+                            },
+                            "queue": QUEUE_PROPERTY
                         }
                     }
                 ),
@@ -88,7 +143,8 @@ class SummonerInsightsMCP:
                             "champion": {
                                 "type": "string",
                                 "description": "Champion name to analyze (optional)"
-                            }
+                            },
+                            "queue": QUEUE_PROPERTY
                         }
                     }
                 ),
@@ -102,7 +158,8 @@ class SummonerInsightsMCP:
                                 "type": "integer",
                                 "description": "Number of recent matches to analyze (default: 10)",
                                 "default": 10
-                            }
+                            },
+                            "queue": QUEUE_PROPERTY
                         }
                     }
                 ),
@@ -116,7 +173,23 @@ class SummonerInsightsMCP:
                                 "type": "integer",
                                 "description": "Number of recent matches to analyze (default: 10)",
                                 "default": 10
-                            }
+                            },
+                            "queue": QUEUE_PROPERTY
+                        }
+                    }
+                ),
+                Tool(
+                    name="get_vision_analysis",
+                    description="Analyze warding and vision control using Riot's official per-match ward stats",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "matches": {
+                                "type": "integer",
+                                "description": "Number of recent matches to analyze (default: 10)",
+                                "default": 10
+                            },
+                            "queue": QUEUE_PROPERTY
                         }
                     }
                 )
@@ -128,53 +201,65 @@ class SummonerInsightsMCP:
                 arguments = {}
             
             try:
+                queue = arguments.get("queue")
                 if name == "get_recent_matches":
-                    return await self._get_recent_matches(arguments.get("limit", 10))
+                    return await self._get_recent_matches(arguments.get("limit", 10), queue)
                 elif name == "get_match_timeline":
                     return await self._get_match_timeline(arguments["match_id"])
                 elif name == "get_performance_trends":
-                    return await self._get_performance_trends(arguments.get("matches", 10))
+                    return await self._get_performance_trends(arguments.get("matches", 10), queue)
                 elif name == "get_champion_performance":
-                    return await self._get_champion_performance(arguments.get("champion"))
+                    return await self._get_champion_performance(arguments.get("champion"), queue)
                 elif name == "analyze_death_patterns":
-                    return await self._analyze_death_patterns(arguments.get("matches", 10))
+                    return await self._analyze_death_patterns(arguments.get("matches", 10), queue)
                 elif name == "get_farming_analysis":
-                    return await self._get_farming_analysis(arguments.get("matches", 10))
+                    return await self._get_farming_analysis(arguments.get("matches", 10), queue)
+                elif name == "get_vision_analysis":
+                    return await self._get_vision_analysis(arguments.get("matches", 10), queue)
                 else:
                     raise ValueError(f"Unknown tool: {name}")
             
             except Exception as e:
                 return [TextContent(type="text", text=f"Error: {str(e)}")]
     
-    async def _get_recent_matches(self, limit: int) -> list[TextContent]:
+    async def _get_recent_matches(self, limit: int, queue: str | None = None) -> list[TextContent]:
+        condition, params = queue_condition(queue)
         conn = self.get_db_connection()
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT match_id, game_creation, game_duration, champion, kills, deaths, assists, 
-                   kda, cs, gold_earned, vision_score, win, position, game_mode
-            FROM matches 
-            ORDER BY game_creation DESC 
+
+        cursor.execute(f"""
+            SELECT match_id, game_creation, game_duration, champion, kills, deaths, assists,
+                   kda, cs, gold_earned, vision_score, win, position, game_mode, queue_id,
+                   lane_cs_at_10, kill_participation, team_damage_share
+            FROM matches
+            WHERE {condition}
+            ORDER BY game_creation DESC
             LIMIT ?
-        """, (limit,))
-        
+        """, (*params, limit))
+
         matches = cursor.fetchall()
         conn.close()
-        
+
         if not matches:
             return [TextContent(type="text", text="No match data found in database.")]
-        
+
         result = f"# Recent {len(matches)} Matches\n\n"
-        
+
         for match in matches:
-            match_id, creation, duration, champion, kills, deaths, assists, kda, cs, gold, vision, win, position, mode = match
+            (match_id, creation, duration, champion, kills, deaths, assists, kda, cs, gold, vision, win, position, mode,
+             queue_id, lane_cs_at_10, kill_participation, team_damage_share) = match
             win_status = "🟢 WIN" if win else "🔴 LOSS"
             duration_min = duration // 60
-            
+            mode = QUEUE_NAMES.get(queue_id, mode)
+
             result += f"## {champion} - {win_status}\n"
             result += f"**Match ID:** {match_id}\n"
             result += f"**Date:** {creation} | **Duration:** {duration_min}m | **Mode:** {mode} | **Position:** {position}\n"
-            result += f"**KDA:** {kills}/{deaths}/{assists} ({kda}) | **CS:** {cs} | **Gold:** {gold:,} | **Vision:** {vision}\n\n"
+            result += f"**KDA:** {kills}/{deaths}/{assists} ({kda}) | **CS:** {cs} | **Gold:** {gold:,} | **Vision:** {vision}\n"
+            if kill_participation is not None:
+                result += (f"**Lane CS @10:** {lane_cs_at_10} | **Kill Participation:** {kill_participation:.0%} "
+                           f"| **Team Damage Share:** {team_damage_share:.0%}\n")
+            result += "\n"
         
         return [TextContent(type="text", text=result)]
     
@@ -183,14 +268,14 @@ class SummonerInsightsMCP:
         cursor = conn.cursor()
         
         # Get match info
-        cursor.execute("SELECT champion, game_duration, win FROM matches WHERE match_id = ?", (match_id,))
+        cursor.execute("SELECT champion, game_duration, win, participant_id FROM matches WHERE match_id = ?", (match_id,))
         match_info = cursor.fetchone()
-        
+
         if not match_info:
             conn.close()
             return [TextContent(type="text", text=f"No match found with ID: {match_id}")]
-        
-        champion, duration, win = match_info
+
+        champion, duration, win, participant_id = match_info
         
         # Get timeline snapshots
         cursor.execute("""
@@ -227,8 +312,9 @@ class SummonerInsightsMCP:
         
         if events:
             result += f"\n## Key Events ({len(events)} total)\n"
-            death_events = [e for e in events if e[1] == 'CHAMPION_KILL' and 'victim' in str(e[4])]
-            kill_events = [e for e in events if e[1] == 'CHAMPION_KILL' and 'killer' in str(e[4])]
+            champion_kills = [e for e in events if e[1] == 'CHAMPION_KILL']
+            death_events = [e for e in champion_kills if is_player_death(e[4], participant_id)]
+            kill_events = [e for e in champion_kills if not is_player_death(e[4], participant_id)]
             
             if death_events:
                 result += f"\n### Deaths ({len(death_events)})\n"
@@ -246,16 +332,19 @@ class SummonerInsightsMCP:
         
         return [TextContent(type="text", text=result)]
     
-    async def _get_performance_trends(self, matches: int) -> list[TextContent]:
+    async def _get_performance_trends(self, matches: int, queue: str | None = None) -> list[TextContent]:
+        condition, params = queue_condition(queue)
         conn = self.get_db_connection()
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT champion, kills, deaths, assists, kda, cs, gold_earned, vision_score, win, game_duration
-            FROM matches 
-            ORDER BY game_creation DESC 
+
+        cursor.execute(f"""
+            SELECT champion, kills, deaths, assists, kda, cs, gold_earned, vision_score, win, game_duration,
+                   lane_cs_at_10, kill_participation, team_damage_share
+            FROM matches
+            WHERE {condition}
+            ORDER BY game_creation DESC
             LIMIT ?
-        """, (matches,))
+        """, (*params, matches))
         
         recent_matches = cursor.fetchall()
         conn.close()
@@ -286,7 +375,18 @@ class SummonerInsightsMCP:
         result += f"- **Average KDA:** {avg_kda:.2f}\n"
         result += f"- **Average CS:** {avg_cs:.1f}\n"
         result += f"- **Average Vision Score:** {avg_vision:.1f}\n"
-        result += f"- **Average Game Duration:** {avg_duration:.1f} minutes\n\n"
+        result += f"- **Average Game Duration:** {avg_duration:.1f} minutes\n"
+
+        avg_lane_cs_at_10 = average(match[10] for match in recent_matches)
+        avg_kill_participation = average(match[11] for match in recent_matches)
+        avg_damage_share = average(match[12] for match in recent_matches)
+        if avg_lane_cs_at_10 is not None:
+            result += f"- **Average Lane CS @10:** {avg_lane_cs_at_10:.1f}\n"
+        if avg_kill_participation is not None:
+            result += f"- **Average Kill Participation:** {avg_kill_participation:.0%}\n"
+        if avg_damage_share is not None:
+            result += f"- **Average Team Damage Share:** {avg_damage_share:.0%}\n"
+        result += "\n"
         
         result += f"## Trend Analysis\n"
         if len(recent_half) > 0 and len(older_half) > 0:
@@ -302,28 +402,30 @@ class SummonerInsightsMCP:
         
         return [TextContent(type="text", text=result)]
     
-    async def _get_champion_performance(self, champion: str = None) -> list[TextContent]:
+    async def _get_champion_performance(self, champion: str = None, queue: str | None = None) -> list[TextContent]:
+        condition, params = queue_condition(queue)
         conn = self.get_db_connection()
         cursor = conn.cursor()
-        
+
         if champion:
-            cursor.execute("""
-                SELECT champion, COUNT(*) as games, 
+            cursor.execute(f"""
+                SELECT champion, COUNT(*) as games,
                        SUM(CASE WHEN win THEN 1 ELSE 0 END) as wins,
                        AVG(kda) as avg_kda, AVG(cs) as avg_cs, AVG(vision_score) as avg_vision
-                FROM matches 
-                WHERE champion = ?
+                FROM matches
+                WHERE champion = ? AND {condition}
                 GROUP BY champion
-            """, (champion,))
+            """, (champion, *params))
         else:
-            cursor.execute("""
-                SELECT champion, COUNT(*) as games, 
+            cursor.execute(f"""
+                SELECT champion, COUNT(*) as games,
                        SUM(CASE WHEN win THEN 1 ELSE 0 END) as wins,
                        AVG(kda) as avg_kda, AVG(cs) as avg_cs, AVG(vision_score) as avg_vision
-                FROM matches 
+                FROM matches
+                WHERE {condition}
                 GROUP BY champion
                 ORDER BY games DESC
-            """)
+            """, params)
         
         champions = cursor.fetchall()
         conn.close()
@@ -342,39 +444,52 @@ class SummonerInsightsMCP:
         
         return [TextContent(type="text", text=result)]
     
-    async def _analyze_death_patterns(self, matches: int) -> list[TextContent]:
+    async def _analyze_death_patterns(self, matches: int, queue: str | None = None) -> list[TextContent]:
+        condition, params = queue_condition(queue)
         conn = self.get_db_connection()
         cursor = conn.cursor()
-        
+
         # Get recent match IDs
-        cursor.execute("""
-            SELECT match_id FROM matches 
-            ORDER BY game_creation DESC 
+        cursor.execute(f"""
+            SELECT match_id, participant_id FROM matches
+            WHERE {condition}
+            ORDER BY game_creation DESC
             LIMIT ?
-        """, (matches,))
-        match_ids = [row[0] for row in cursor.fetchall()]
-        
-        if not match_ids:
+        """, (*params, matches))
+        participant_ids = dict(cursor.fetchall())
+
+        if not participant_ids:
+            conn.close()
             return [TextContent(type="text", text="No matches found for death pattern analysis.")]
-        
+
         # Get death events
+        match_ids = list(participant_ids)
         placeholders = ','.join('?' * len(match_ids))
         cursor.execute(f"""
             SELECT match_id, timestamp, position_x, position_y, details
-            FROM timeline_events 
-            WHERE match_id IN ({placeholders}) 
+            FROM timeline_events
+            WHERE match_id IN ({placeholders})
             AND event_type = 'CHAMPION_KILL'
-            AND details LIKE '%victim%'
             ORDER BY timestamp
         """, match_ids)
-        
-        deaths = cursor.fetchall()
+
+        deaths = [
+            row for row in cursor.fetchall()
+            if is_player_death(row[4], participant_ids[row[0]])
+        ]
         conn.close()
-        
+
+        missing = [m for m, pid in participant_ids.items() if pid is None]
+        if missing:
+            return [TextContent(type="text", text=(
+                f"{len(missing)} of the last {len(participant_ids)} matches were stored without a participant ID, "
+                "so deaths cannot be told apart from kills. Re-run summoner_insights.py to refresh them."
+            ))]
+
         if not deaths:
             return [TextContent(type="text", text="No death data found in recent matches.")]
         
-        result = f"# Death Pattern Analysis (Last {matches} matches)\n\n"
+        result = f"# Death Pattern Analysis (Last {len(participant_ids)} matches)\n\n"
         result += f"**Total Deaths:** {len(deaths)}\n\n"
         
         # Timing analysis
@@ -403,20 +518,23 @@ class SummonerInsightsMCP:
         
         return [TextContent(type="text", text=result)]
     
-    async def _get_farming_analysis(self, matches: int) -> list[TextContent]:
+    async def _get_farming_analysis(self, matches: int, queue: str | None = None) -> list[TextContent]:
+        condition, params = queue_condition(queue)
         conn = self.get_db_connection()
         cursor = conn.cursor()
-        
+
         # Get recent match IDs and their CS
-        cursor.execute("""
+        cursor.execute(f"""
             SELECT m.match_id, m.champion, m.cs, m.game_duration, m.win
             FROM matches m
-            ORDER BY m.game_creation DESC 
+            WHERE {condition}
+            ORDER BY m.game_creation DESC
             LIMIT ?
-        """, (matches,))
+        """, (*params, matches))
         matches_data = cursor.fetchall()
-        
+
         if not matches_data:
+            conn.close()
             return [TextContent(type="text", text="No farming data available.")]
         
         # Get timeline snapshots for CS progression
@@ -432,7 +550,7 @@ class SummonerInsightsMCP:
         timeline_data = cursor.fetchall()
         conn.close()
         
-        result = f"# Farming Analysis (Last {matches} matches)\n\n"
+        result = f"# Farming Analysis (Last {len(matches_data)} matches)\n\n"
         
         # Overall CS stats
         total_cs = sum(m[2] for m in matches_data)
@@ -495,11 +613,63 @@ class SummonerInsightsMCP:
         
         return [TextContent(type="text", text=result)]
 
+    async def _get_vision_analysis(self, matches: int, queue: str | None = None) -> list[TextContent]:
+        condition, params = queue_condition(queue)
+        conn = self.get_db_connection()
+        cursor = conn.cursor()
+
+        cursor.execute(f"""
+            SELECT champion, game_duration, win, vision_score,
+                   wards_placed, control_wards_bought, control_wards_placed, wards_killed
+            FROM matches
+            WHERE {condition} AND wards_placed IS NOT NULL AND game_duration >= {REMAKE_MAX_SECONDS}
+            ORDER BY game_creation DESC
+            LIMIT ?
+        """, (*params, matches))
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            return [TextContent(type="text", text=(
+                "No ward data found. Re-run summoner_insights.py to download Riot's per-match ward stats."
+            ))]
+
+        def per_minute(value, duration):
+            return value / (duration / 60)
+
+        games = len(rows)
+        no_control_wards = sum(1 for row in rows if row[5] == 0)
+
+        result = f"# Vision Analysis (Last {games} matches, remakes excluded)\n\n"
+        result += "## Averages\n"
+        result += f"- **Vision Score/min:** {average(per_minute(r[3], r[1]) for r in rows):.2f}\n"
+        result += f"- **Wards Placed/min:** {average(per_minute(r[4], r[1]) for r in rows):.2f}\n"
+        result += f"- **Control Wards Bought per Game:** {average(r[5] for r in rows):.1f}\n"
+        result += f"- **Control Wards Placed per Game:** {average(r[6] for r in rows):.1f}\n"
+        result += f"- **Enemy Wards Cleared per Game:** {average(r[7] for r in rows):.1f}\n"
+        result += f"- **Games Without a Control Ward:** {no_control_wards}/{games}\n\n"
+
+        wins = [r for r in rows if r[2]]
+        losses = [r for r in rows if not r[2]]
+        if wins and losses:
+            result += "## Vision Score/min by Outcome\n"
+            result += f"- **Wins:** {average(per_minute(r[3], r[1]) for r in wins):.2f} ({len(wins)} games)\n"
+            result += f"- **Losses:** {average(per_minute(r[3], r[1]) for r in losses):.2f} ({len(losses)} games)\n\n"
+
+        result += "## Per Match\n"
+        result += "| Champion | Min | Result | Vision | Wards | Control Bought | Control Placed | Cleared |\n"
+        result += "|----------|-----|--------|--------|-------|----------------|----------------|---------|\n"
+        for champion, duration, win, vision, placed, bought, control_placed, killed in rows:
+            result += (f"| {champion} | {duration // 60} | {'W' if win else 'L'} | {vision} | {placed} "
+                       f"| {bought} | {control_placed} | {killed} |\n")
+
+        return [TextContent(type="text", text=result)]
+
 
 async def main():
     parser = argparse.ArgumentParser(description="Summoner Insights MCP Server")
-    parser.add_argument("--db-path", default="summoner_insights.db", 
-                       help="Path to SQLite database file")
+    parser.add_argument("--db-path",
+                       help="Path to SQLite database file (default: the database of the account in .env)")
     args = parser.parse_args()
     
     server = SummonerInsightsMCP(args.db_path)

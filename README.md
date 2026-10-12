@@ -15,6 +15,8 @@ Transform your League of Legends gameplay with personalized AI coaching! Summone
 - **⏱️ Timeline Analysis** - Minute-by-minute progression tracking (CS, gold, XP, positioning)
 - **🎯 Performance Insights** - Win rate trends, champion performance, and farming efficiency
 - **💀 Death Pattern Analysis** - Identify positioning mistakes and timing issues
+- **👁️ Vision Analysis** - Wards placed, control wards bought and wards cleared, from Riot's official match stats
+- **🏆 Queue Filtering** - Analyze ranked solo/duo, flex, normal or ARAM games separately
 - **🤖 AI Coaching Integration** - Connect with Claude through MCP for personalized coaching
 - **📈 Trend Analysis** - Track your improvement over time with detailed statistics
 
@@ -22,6 +24,9 @@ Transform your League of Legends gameplay with personalized AI coaching! Summone
 
 ### Match Statistics
 - KDA, CS, Gold, Vision Score
+- Lane CS at 10 minutes, kill participation and team damage share
+- Wards placed, control wards bought/placed and wards cleared
+- Queue type (ranked solo/duo, flex, normal, ARAM)
 - Champion performance by win rate
 - Game duration and outcome analysis
 - Item build tracking
@@ -37,6 +42,7 @@ Transform your League of Legends gameplay with personalized AI coaching! Summone
 - **Champion Analysis** - Which champions work best for you?
 - **Death Patterns** - Where and when do you die most?
 - **Farming Analysis** - CS efficiency and timing breakdowns
+- **Vision Analysis** - Warding habits and vision score per minute
 - **Timeline Insights** - Minute-by-minute coaching feedback
 
 ## 📋 Prerequisites
@@ -60,9 +66,10 @@ Transform your League of Legends gameplay with personalized AI coaching! Summone
    cd summoner-insights
    ```
 
-3. **Install Python dependencies**:
+3. **Create a virtual environment and install Python dependencies**:
    ```bash
-   pip install -r requirements.txt
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
    ```
 
 4. **Set up environment variables**:
@@ -79,9 +86,10 @@ Transform your League of Legends gameplay with personalized AI coaching! Summone
    cd summoner-insights
    ```
 
-2. **Install Python dependencies**:
+2. **Create a virtual environment and install Python dependencies**:
    ```bash
-   pip3 install -r requirements.txt
+   python3 -m venv .venv
+   .venv/bin/pip install -r requirements.txt
    ```
 
 3. **Set up environment variables**:
@@ -100,14 +108,17 @@ Create a `.env` file with your Riot API credentials:
 RIOT_API_KEY=your_riot_api_key_here
 RIOT_USERNAME=YourGameName
 RIOT_TAGLINE=NA1
+RIOT_PLATFORM=NA1
 ```
 
 **Important Notes:**
 - `RIOT_USERNAME` is your in-game name (without the #tag)
-- `RIOT_TAGLINE` is your region/tag (e.g., NA1, EUW1, etc.)
-- Get your API key from [Riot Developer Portal](https://developer.riotgames.com/)
+- `RIOT_TAGLINE` is your Riot ID tag, the part after the `#` (e.g. `Player#EUW` → `EUW`)
+- `RIOT_PLATFORM` is the server your account plays on (e.g. `EUW1`). It is optional and defaults to `RIOT_TAGLINE`, so set it whenever your tag is not a server code, such as `#EUW` or a custom tag
+- Each account gets its own database file, `summoner_insights_<RIOT_USERNAME>_<RIOT_TAGLINE>.db`, used by both the downloader and the MCP server. To switch accounts, change `RIOT_USERNAME`/`RIOT_TAGLINE`, run the downloader, and restart the MCP server
+- Get your API key from [Riot Developer Portal](https://developer.riotgames.com/). Development keys expire every 24 hours; register your project for a personal key if you use this regularly
 
-### Supported Regions
+### Supported Platforms
 - **Americas**: NA1, BR1, LA1, LA2
 - **Europe**: EUW1, EUN1, TR1, RU
 - **Asia**: KR, JP1
@@ -119,16 +130,30 @@ RIOT_TAGLINE=NA1
 Run the data collection script to fetch your recent matches:
 
 ```bash
-python3 summoner_insights.py
+.venv/bin/python3 summoner_insights.py
 ```
 
 This will:
-- Fetch your last 10 matches from Riot API
-- Store match statistics in SQLite database
+- Check your last 30 matches on the Riot API and download only the ones not stored yet
+- Store match statistics in the account's SQLite database
 - Collect timeline data for detailed analysis
-- Display a summary of your recent performance
+- Display a summary of the newly downloaded matches
+
+Use `--count` to check more or fewer matches:
+
+```bash
+.venv/bin/python3 summoner_insights.py --count 50
+```
+
+Each new match takes two API requests. Development keys allow 100 requests every 2 minutes, so large first downloads may fail partway through; run the script again and it picks up the remaining matches. Matches whose timeline download failed are retried automatically.
 
 ### 2. AI Coaching with Claude (Optional)
+
+#### Claude Code
+
+The repository includes a project-scoped `.mcp.json` that starts the server with the virtual environment's Python. Run Claude Code from the repository directory and approve the `summoner-insights` server when prompted.
+
+#### Claude Desktop
 
 Connect the MCP server to Claude Desktop for AI-powered coaching:
 
@@ -144,7 +169,7 @@ Open `%APPDATA%\\Claude\\claude_desktop_config.json` and add:
       "command": "wsl",
       "args": [
         "-e", "bash", "-c", 
-        "cd /path/to/summoner-insights && python3 summoner_insights_mcp.py"
+        "cd /path/to/summoner-insights && .venv/bin/python3 summoner_insights_mcp.py"
       ]
     }
   }
@@ -158,7 +183,7 @@ Open `~/.config/claude-desktop/claude_desktop_config.json` and add:
 {
   "mcpServers": {
     "summoner-insights": {
-      "command": "python3",
+      "command": "/path/to/summoner-insights/.venv/bin/python3",
       "args": ["/path/to/summoner-insights/summoner_insights_mcp.py"],
       "cwd": "/path/to/summoner-insights"
     }
@@ -179,6 +204,7 @@ In Claude Desktop, you can now use these coaching tools:
 - `get_champion_performance` - Champion-specific stats
 - `analyze_death_patterns` - Positioning analysis
 - `get_farming_analysis` - CS efficiency breakdown
+- `get_vision_analysis` - Warding and vision control
 - `get_match_timeline` - Detailed match progression
 
 ## 🔧 Available Tools
@@ -198,7 +224,10 @@ In Claude Desktop, you can now use these coaching tools:
 | `get_champion_performance` | Champion-specific statistics | "How do I perform on Jinx?" |
 | `analyze_death_patterns` | Death location and timing analysis | "Where do I die most often?" |
 | `get_farming_analysis` | CS progression and efficiency | "How's my farming?" |
+| `get_vision_analysis` | Wards placed, control wards and vision score | "Am I warding enough?" |
 | `get_match_timeline` | Detailed match progression | "Show me timeline for match X" |
+
+Every tool except `get_match_timeline` accepts an optional `queue` argument: `all` (default), `ranked_solo`, `ranked_flex`, `ranked`, `normal` or `aram`. For example: "How's my farming in ranked solo games?"
 
 ## 📊 Example Coaching Insights
 
@@ -233,9 +262,9 @@ Death Timing Distribution:
 
 ## 🗃️ Database Schema
 
-The tool creates a SQLite database with three tables:
+The tool creates a SQLite database with three tables. Databases created by older versions are upgraded automatically, and older matches are downloaded again to fill in the new columns.
 
-- **`matches`** - Basic match statistics (KDA, CS, items, etc.)
+- **`matches`** - Match statistics (KDA, CS, items, queue, ward stats, lane CS at 10, kill participation, damage share)
 - **`timeline_snapshots`** - Minute-by-minute player progression
 - **`timeline_events`** - Key events (kills, deaths, objectives, items)
 
@@ -246,12 +275,15 @@ The tool creates a SQLite database with three tables:
 **"Error: 'name'"**
 - Make sure you've run `summoner_insights.py` at least once to create the database
 
-**"403 Forbidden"**
-- Check your API key is valid and not expired
-- Ensure you're using the correct region/tagline
+**"403 Forbidden" or "401 Unknown apikey"**
+- Check your API key is valid and not expired. Development keys expire every 24 hours
+- Regenerating a key invalidates the previous one, so copy the key currently shown on the dashboard
+
+**"Failed to resolve 'euw.api.riotgames.com'"** (or a similar host)
+- Your Riot ID tag is not a server code. Set `RIOT_PLATFORM` to your server, e.g. `RIOT_PLATFORM=EUW1`
 
 **"No such table: matches"**
-- Run `python3 summoner_insights.py` to initialize the database
+- Run `.venv/bin/python3 summoner_insights.py` to initialize the database
 
 **MCP Server not connecting**
 - Verify the file paths in your Claude Desktop config
@@ -263,7 +295,13 @@ The tool creates a SQLite database with three tables:
 1. Check that your `.env` file is properly configured
 2. Verify your Riot API key is active
 3. Ensure Python 3.8+ is installed
-4. Make sure all dependencies are installed via `pip install -r requirements.txt`
+4. Make sure all dependencies are installed via `.venv/bin/pip install -r requirements.txt`
+
+## 🧪 Running Tests
+
+```bash
+.venv/bin/python3 -m unittest discover -s tests
+```
 
 ## 📝 License
 

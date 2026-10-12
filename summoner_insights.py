@@ -4,6 +4,7 @@ Summoner Insights - League of Legends Performance Analysis
 AI-powered coaching through comprehensive match data collection and analysis
 """
 
+import argparse
 import os
 import sqlite3
 import requests
@@ -13,19 +14,40 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ADDED_MATCH_COLUMNS = {
+    'participant_id': 'INTEGER',
+    'queue_id': 'INTEGER',
+    'wards_placed': 'INTEGER',
+    'control_wards_bought': 'INTEGER',
+    'control_wards_placed': 'INTEGER',
+    'wards_killed': 'INTEGER',
+    'lane_cs_at_10': 'INTEGER',
+    'kill_participation': 'REAL',
+    'team_damage_share': 'REAL',
+}
+
+MATCH_IDS_PAGE_SIZE = 100
+
+
+def account_db_path(username, tagline):
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, f"summoner_insights_{username}_{tagline}.db")
+
+
 class SummonerInsights:
-    def __init__(self):
+    def __init__(self, db_path=None):
         self.api_key = os.getenv('RIOT_API_KEY')
         self.username = os.getenv('RIOT_USERNAME')
         self.tagline = os.getenv('RIOT_TAGLINE')
+        self.platform = (os.getenv('RIOT_PLATFORM') or self.tagline or '').lower()
         
         if not all([self.api_key, self.username, self.tagline]):
             raise ValueError("Missing required environment variables: RIOT_API_KEY, RIOT_USERNAME, RIOT_TAGLINE")
         
-        self.base_url = f"https://{self.tagline.lower()}.api.riotgames.com"
+        self.base_url = f"https://{self.platform}.api.riotgames.com"
         self.regional_url = self._get_regional_url()
         self.headers = {"X-Riot-Token": self.api_key}
-        self.db_path = 'summoner_insights.db'
+        self.db_path = db_path or account_db_path(self.username, self.tagline)
         self._init_database()
     
     def _get_regional_url(self):
@@ -41,7 +63,7 @@ class SummonerInsights:
             'kr': 'asia',
             'jp1': 'asia'
         }
-        regional = region_mapping.get(self.tagline.lower(), 'americas')
+        regional = region_mapping.get(self.platform, 'americas')
         return f"https://{regional}.api.riotgames.com"
     
     def _init_database(self):
@@ -74,6 +96,11 @@ class SummonerInsights:
                 item_5 INTEGER
             )
         ''')
+
+        columns = {row[1] for row in cursor.execute("PRAGMA table_info(matches)")}
+        for column, column_type in ADDED_MATCH_COLUMNS.items():
+            if column not in columns:
+                cursor.execute(f"ALTER TABLE matches ADD COLUMN {column} {column_type}")
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS timeline_snapshots (
@@ -130,13 +157,21 @@ class SummonerInsights:
     
     def get_match_history(self, puuid, count=10):
         url = f"{self.regional_url}/lol/match/v5/matches/by-puuid/{puuid}/ids"
-        params = {"start": 0, "count": count}
-        response = requests.get(url, headers=self.headers, params=params)
-        
-        if response.status_code != 200:
-            raise Exception(f"Failed to get match history: {response.status_code} - {response.text}")
-        
-        return response.json()
+        match_ids = []
+
+        while len(match_ids) < count:
+            params = {"start": len(match_ids), "count": min(MATCH_IDS_PAGE_SIZE, count - len(match_ids))}
+            response = requests.get(url, headers=self.headers, params=params)
+
+            if response.status_code != 200:
+                raise Exception(f"Failed to get match history: {response.status_code} - {response.text}")
+
+            page = response.json()
+            match_ids.extend(page)
+            if len(page) < params["count"]:
+                break
+
+        return match_ids
     
     def get_match_details(self, match_id):
         url = f"{self.regional_url}/lol/match/v5/matches/{match_id}"
@@ -169,7 +204,8 @@ class SummonerInsights:
             return None
         
         game_info = match_data['info']
-        
+        challenges = player_stats.get('challenges', {})
+
         return {
             'match_id': match_data['metadata']['matchId'],
             'game_creation': datetime.fromtimestamp(game_info['gameCreation'] / 1000).strftime('%Y-%m-%d %H:%M:%S'),
@@ -187,13 +223,32 @@ class SummonerInsights:
             'vision_score': player_stats['visionScore'],
             'win': player_stats['win'],
             'position': player_stats['teamPosition'],
+            'participant_id': player_stats['participantId'],
+            'queue_id': game_info['queueId'],
+            'wards_placed': player_stats['wardsPlaced'],
+            'control_wards_bought': player_stats['visionWardsBoughtInGame'],
+            'control_wards_placed': player_stats['detectorWardsPlaced'],
+            'wards_killed': player_stats['wardsKilled'],
+            'lane_cs_at_10': challenges.get('laneMinionsFirst10Minutes'),
+            'kill_participation': challenges.get('killParticipation'),
+            'team_damage_share': challenges.get('teamDamagePercentage'),
             'items': [
                 player_stats['item0'], player_stats['item1'], player_stats['item2'],
                 player_stats['item3'], player_stats['item4'], player_stats['item5']
             ]
         }
     
-    def retrieve_stats(self):
+    def stored_match_ids(self):
+        conn = sqlite3.connect(self.db_path)
+        rows = conn.execute("""
+            SELECT match_id FROM matches m
+            WHERE queue_id IS NOT NULL
+            AND EXISTS (SELECT 1 FROM timeline_snapshots s WHERE s.match_id = m.match_id)
+        """).fetchall()
+        conn.close()
+        return {row[0] for row in rows}
+
+    def retrieve_stats(self, count=30):
         print(f"Retrieving stats for {self.username}#{self.tagline}...")
         
         account_data = self.get_account_by_riot_id()
@@ -204,8 +259,10 @@ class SummonerInsights:
         summoner_name = summoner_data.get('name', account_data.get('gameName', 'Unknown'))
         print(f"Found summoner: {summoner_name} (Level {summoner_data['summonerLevel']})")
         
-        match_ids = self.get_match_history(puuid)
-        print(f"Found {len(match_ids)} recent matches")
+        recent_ids = self.get_match_history(puuid, count)
+        stored_ids = self.stored_match_ids()
+        match_ids = [m for m in recent_ids if m not in stored_ids]
+        print(f"Found {len(recent_ids)} recent matches, {len(match_ids)} not yet stored")
         
         all_stats = []
         
@@ -217,13 +274,13 @@ class SummonerInsights:
                 stats = self.extract_player_stats(match_data, puuid)
                 
                 if stats:
-                    all_stats.append(stats)
-                    
                     print(f"  Fetching timeline data...")
                     timeline_data = self.get_match_timeline(match_id)
                     snapshots, events = self.extract_timeline_data(timeline_data, puuid)
                     self.write_timeline_to_database(match_id, snapshots, events)
                     print(f"  Timeline: {len(snapshots)} snapshots, {len(events)} events")
+
+                    all_stats.append(stats)
                 
                 time.sleep(0.1)
                 
@@ -285,6 +342,7 @@ class SummonerInsights:
     def _is_player_event(self, event, participant_id):
         return (
             event.get('participantId') == participant_id or
+            event.get('creatorId') == participant_id or
             event.get('killerId') == participant_id or
             event.get('victimId') == participant_id or
             (event.get('type') in ['CHAMPION_KILL', 'ELITE_MONSTER_KILL', 'BUILDING_KILL'] and 
@@ -322,23 +380,13 @@ class SummonerInsights:
         new_matches = 0
         
         for stats in stats_data:
-            items = stats['items']
-            
-            cursor.execute('''
-                INSERT OR REPLACE INTO matches (
-                    match_id, game_creation, game_duration, game_mode, champion,
-                    kills, deaths, assists, kda, cs, gold_earned,
-                    damage_dealt, damage_taken, vision_score, win, position,
-                    item_0, item_1, item_2, item_3, item_4, item_5
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                stats['match_id'], stats['game_creation'], stats['game_duration'],
-                stats['game_mode'], stats['champion'], stats['kills'], stats['deaths'],
-                stats['assists'], stats['kda'], stats['cs'], stats['gold_earned'],
-                stats['damage_dealt'], stats['damage_taken'], stats['vision_score'],
-                stats['win'], stats['position'], items[0], items[1], items[2],
-                items[3], items[4], items[5]
-            ))
+            row = {key: value for key, value in stats.items() if key != 'items'}
+            row.update({f'item_{i}': item for i, item in enumerate(stats['items'])})
+
+            cursor.execute(f'''
+                INSERT OR REPLACE INTO matches ({', '.join(row)})
+                VALUES ({', '.join(':' + column for column in row)})
+            ''', row)
             
             if cursor.rowcount > 0:
                 new_matches += 1
@@ -354,6 +402,8 @@ class SummonerInsights:
         
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
+        
+        cursor.execute("DELETE FROM timeline_events WHERE match_id = ?", (match_id,))
         
         for snapshot in snapshots:
             cursor.execute('''
@@ -379,17 +429,22 @@ class SummonerInsights:
         conn.close()
 
 def main():
+    parser = argparse.ArgumentParser(description="Download recent League of Legends matches into the local database")
+    parser.add_argument("--count", type=int, default=30,
+                        help="Number of recent matches to check; already stored matches are skipped (default: 30)")
+    args = parser.parse_args()
+
     try:
         insights = SummonerInsights()
-        stats = insights.retrieve_stats()
+        stats = insights.retrieve_stats(args.count)
         insights.write_to_database(stats)
-        
+
         print(f"\nSummary:")
-        print(f"Total matches processed: {len(stats)}")
-        wins = sum(1 for stat in stats if stat['win'])
-        print(f"Wins: {wins}/{len(stats)} ({wins/len(stats)*100:.1f}%)")
-        
+        print(f"New matches processed: {len(stats)}")
+
         if stats:
+            wins = sum(1 for stat in stats if stat['win'])
+            print(f"Wins: {wins}/{len(stats)} ({wins/len(stats)*100:.1f}%)")
             avg_kda = sum(stat['kda'] for stat in stats) / len(stats)
             print(f"Average KDA: {avg_kda:.2f}")
             
